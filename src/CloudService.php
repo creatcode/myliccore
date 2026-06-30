@@ -53,12 +53,31 @@ class CloudService
             false
         );
 
-        if (!$response || $response['code'] == 0) {
+        if (!$response || ($response['code'] ?? 0) == 0) {
             exception($response['msg'] ?? '云端服务异常');
         }
 
-        file_put_contents(self::$authpath, $response['data']['secret_key']);
-        file_put_contents(self::$licensepath, $response['data']['license'] ?? '');
+        $data = is_array($response['data'] ?? null) ? $response['data'] : [];
+        $secretKey = trim((string) ($data['secret_key'] ?? ''));
+        $license = trim((string) ($data['license'] ?? ''));
+        $licenseDir = dirname(self::$authpath);
+
+        if ($secretKey === '') {
+            exception('云端返回的授权信息不完整');
+        }
+
+        if (!is_dir($licenseDir) && !@mkdir($licenseDir, 0755, true)) {
+            exception('创建授权目录失败，请检查目录权限');
+        }
+
+        if (file_put_contents(self::$authpath, $secretKey, LOCK_EX) === false) {
+            exception('保存授权锁文件失败');
+        }
+
+        // license 文件不是必需项，只有云端返回内容时才落盘
+        if ($license !== '' && file_put_contents(self::$licensepath, $license, LOCK_EX) === false) {
+            exception('保存授权文件失败');
+        }
     }
 
     /**
@@ -91,10 +110,15 @@ class CloudService
                         'connect_timeout' => 2,
                         'http_errors'     => false,
                     ]);
+                    $type = trim((string) ($this->cloudconfig['type'] ?? ''));
+                    if ($type === '') {
+                        abort(403, '请先配置 cloud.type');
+                    }
+
                     $response = $client->post(rtrim($baseurl, '/') . '/api/index/checkauth', [
                         'form_params' => [
                             'code' => $this->getcode(),
-                            'type' => $this->cloudconfig['type']
+                            'type' => $type,
                         ],
                     ]);
                     $body    = $response->getBody();

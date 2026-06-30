@@ -4,11 +4,81 @@ require_once "../vendor/creatcode/liccore/src/CloudService.php";
 require_once "../thinkphp/library/think/Config.php";
 
 /**
+ * 统一返回 JSON 响应
+ *
+ * @param int $code 状态码
+ * @param string $msg 提示信息
+ * @param array $data 附加数据
+ * @return void
+ */
+function json_response(int $code, string $msg, array $data = []): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+    exit(json_encode([
+        'code' => $code,
+        'msg'  => $msg,
+        'data' => $data,
+    ], JSON_UNESCAPED_UNICODE));
+}
+
+/**
+ * 输出全屏错误提示并终止
+ *
+ * @param string $message 错误信息
+ * @return void
+ */
+function render_block_message(string $message): void
+{
+    $message = htmlspecialchars($message, ENT_QUOTES, 'UTF-8');
+
+    echo <<<HTML
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <title>站点注册</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+            background: rgba(15, 23, 42, 0.92);
+        }
+        .fullscreen-mask {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+        .mask-message {
+            max-width: 640px;
+            padding: 20px 28px;
+            border-radius: 12px;
+            background: #fff;
+            color: #111827;
+            font-size: 16px;
+            line-height: 1.7;
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.22);
+        }
+    </style>
+</head>
+<body>
+    <div class="fullscreen-mask">
+        <div class="mask-message">{$message}</div>
+    </div>
+</body>
+</html>
+HTML;
+    exit;
+}
+
+/**
  * 发送 CURL 请求
  *
  * @param string $url 请求地址
  * @param array $params 请求参数
- * @param string $method 请求方式
+ * @param string $method 请求方法
  * @param int $timeout 超时时间
  * @return string
  * @throws Exception
@@ -18,12 +88,16 @@ function curl_request(string $url, array $params = [], string $method = 'POST', 
     $method = strtoupper($method);
     $ch = curl_init();
 
+    if ($ch === false) {
+        throw new Exception('初始化 CURL 失败');
+    }
+
     if ($method === 'GET' && !empty($params)) {
         $url .= (strpos($url, '?') === false ? '?' : '&') . http_build_query($params);
     }
 
     $headers = [
-        'Content-Type: application/x-www-form-urlencoded',
+        'Content-Type: application/x-www-form-urlencoded; charset=UTF-8',
         'User-Agent: SiteAuthorization',
     ];
 
@@ -52,677 +126,839 @@ function curl_request(string $url, array $params = [], string $method = 'POST', 
     }
 
     if ($statusCode < 200 || $statusCode >= 300) {
-        throw new Exception('授权服务响应异常，HTTP状态码：' . $statusCode);
+        throw new Exception('授权服务响应异常，HTTP 状态码：' . $statusCode);
     }
 
     return $response;
 }
 
-$method = $_SERVER['REQUEST_METHOD'];
-$lockFile = "../application/common/license/register.lock";
-$licenseFile = "../application/common/license/license.lic";
-$pemFile = "../application/common/license/public.pem";
-if (!is_dir("../application/common/license/")) {
-    mkdir("../application/common/license/", 0755, true);
+/**
+ * 加载云端配置
+ * 优先读取业务配置，不存在时回退到 liccore 默认配置
+ *
+ * @return array
+ * @throws Exception
+ */
+function load_cloud_config(): array
+{
+    $configPath = "../application/extra/cloud.php";
+
+    if (!is_file($configPath)) {
+        throw new Exception('未找到云端配置文件：application/extra/cloud.php');
+    }
+
+    $config = include $configPath;
+
+    if (!is_array($config)) {
+        throw new Exception('云端配置文件格式错误');
+    }
+
+    return $config;
 }
+
+/**
+ * 保存云端配置到业务目录
+ *
+ * @param array $cloudConfig 配置内容
+ * @return void
+ * @throws Exception
+ */
+function save_cloud_config(array $cloudConfig): void
+{
+    $configDir = "../application/extra";
+    $configPath = $configDir . "/cloud.php";
+
+    if (!is_dir($configDir) && !mkdir($configDir, 0755, true) && !is_dir($configDir)) {
+        throw new Exception('创建配置目录失败：' . $configDir);
+    }
+
+    $content = "<?php\n\nreturn " . var_export($cloudConfig, true) . ";\n";
+    if (file_put_contents($configPath, $content) === false) {
+        throw new Exception('保存云端配置失败：' . $configPath);
+    }
+}
+
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+$licenseDir = "../application/common/license";
+$lockFile = $licenseDir . "/register.lock";
+$licenseFile = $licenseDir . "/license.lic";
+$pemFile = $licenseDir . "/public.pem";
+
+if (!is_dir($licenseDir) && !mkdir($licenseDir, 0755, true) && !is_dir($licenseDir)) {
+    render_block_message('授权目录创建失败，请检查 application/common/license 的写入权限。');
+}
+
 if (is_file($lockFile)) {
     exit('<title>站点注册</title><div style="text-align:center;margin-top:300px;font-size:20px;">此站点已注册</div>');
 }
-$config = include "../application/extra/cloud.php";
 
-$cloudUrl = trim($config['url'] ?? '');
+try {
+    $config = load_cloud_config();
+} catch (\Throwable $e) {
+    render_block_message($e->getMessage());
+}
+
+$cloudUrl = trim((string) ($config['url'] ?? ''));
 if ($cloudUrl !== '' && !preg_match('/^https?:\/\//i', $cloudUrl)) {
     $cloudUrl = 'http://' . $cloudUrl;
 }
 $cloudUrl = rtrim($cloudUrl, '/');
+
 $requiredConfig = ['url', 'version'];
 foreach ($requiredConfig as $key) {
     if (empty($config[$key])) {
-        $msgcontent = "请先在配置文件 application/extra/cloud.php 中填写完整的配置信息再进行操作";
-        echo <<<EOF
-    <style>
-    .fullscreen-mask {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0,0,0,0.8);
-        z-index: 9999;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-    }
-    .mask-message {
-        background: #fff;
-        color: #000;
-        padding: 20px 30px;
-        border-radius: 8px;
-        font-size: 18px;
-        box-shadow: 0 0 10px rgba(0,0,0,0.3);
-        font-family: "Microsoft Yahei", sans-serif;
-    }
-    </style>
-    
-    <div class="fullscreen-mask">
-        <div class="mask-message">$msgcontent</div>
-    </div>
-    EOF;
-        break;
+        render_block_message('请先在 application/extra/cloud.php 中填写完整的配置后再继续操作。');
     }
 }
-if ($method == 'POST') {
+
+if ($method === 'POST') {
     try {
         define('DS', DIRECTORY_SEPARATOR);
         defined('APP_PATH') or define('APP_PATH', dirname($_SERVER['SCRIPT_FILENAME']) . DS);
         defined('ROOT_PATH') or define('ROOT_PATH', dirname(realpath(APP_PATH)) . DS);
         defined('RUNTIME_PATH') or define('RUNTIME_PATH', ROOT_PATH . 'runtime' . DS);
 
-        $os    = PHP_OS_FAMILY;
-        $filename     = md5("{$os}_machine_code") . ".dat";
-        $cachePath    = RUNTIME_PATH . "{$filename}";
-        @unlink($cachePath);
-        // if ($os === 'Windows') {
-        //     // 清除机器ID文件
-        //     $machineIdFile = APP_PATH . 'common' . DS . 'license' . DS . 'machine.id';
-        //     is_file($machineIdFile) && @unlink($machineIdFile);
-        // }
+        // 清理机器码缓存，避免读取旧值
+        $os = PHP_OS_FAMILY;
+        $filename = md5("{$os}_machine_code") . ".dat";
+        $cachePath = RUNTIME_PATH . $filename;
+        is_file($cachePath) && @unlink($cachePath);
 
-        $url = $cloudUrl . '/api/index/site_reg';
-        $params['name'] = $_POST['name'];
+        $name = trim((string) ($_POST['name'] ?? ''));
         $authCheck = isset($_POST['auth_check']) && (int) $_POST['auth_check'] === 1 ? 1 : 0;
-        $period = trim($_POST['period'] ?? '');
+        $period = trim((string) ($_POST['period'] ?? ''));
+        $env = trim((string) ($_POST['env'] ?? ($config['env'] ?? 'local')));
+        $projectId = trim((string) ($_POST['project_id'] ?? ''));
+        $devnum = trim((string) ($_POST['devnum'] ?? '-1'));
+
+        if ($name === '') {
+            throw new Exception('请输入站点名称');
+        }
+
+        if ($projectId === '') {
+            throw new Exception('请选择项目类型');
+        }
+
+        $env = in_array($env, ['local', 'online'], true) ? $env : 'local';
+
         if ($authCheck === 1) {
             if ($period === '') {
                 throw new Exception('请选择授权有效期');
             }
 
             // 原生 date 只提交日期，这里统一补齐到当天结束时间
-            $params['period'] = $period . ' 23:59:59';
+            $periodValue = $period . ' 23:59:59';
         } else {
-            $params['period'] = '2999-12-31 23:59:59';
-        }
-        $params['auth_check'] = $authCheck;
-        $env = $_POST['env'] ?? ($config['env'] ?? 'local');
-        $env = in_array($env, ['local', 'online'], true) ? $env : 'local';
-        $projectId = trim($_POST['project_id'] ?? '');
-        if ($projectId === '') {
-            throw new Exception('请选择项目类型');
+            $periodValue = '2999-12-31 23:59:59';
         }
 
-        $params['devnum'] = $_POST['devnum'] ?? '-1';
-        $params['version'] = $config['version'];
-        $params['project_id'] = $projectId;
-        $params['type'] = $env;
-        $protocol = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http';
-        $host = $_SERVER['HTTP_HOST'];
-        $fullDomain = $protocol . '://' . $host;
-        $params['url'] = $fullDomain;
+        $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host = $_SERVER['HTTP_HOST'] ?? '';
+        if ($host === '') {
+            throw new Exception('无法获取当前站点域名');
+        }
 
         $machineCode = \safeaccess\CloudService::init()->getcode();
         if (empty($machineCode)) {
             throw new Exception('获取设备编码失败');
         }
 
-        $params['code'] = $machineCode;
+        $params = [
+            'name'       => $name,
+            'auth_check' => $authCheck,
+            'period'     => $periodValue,
+            'devnum'     => $devnum,
+            'version'    => (string) $config['version'],
+            'project_id' => $projectId,
+            'type'       => $env,
+            'url'        => $protocol . '://' . $host,
+            'code'       => $machineCode,
+        ];
+
+        $url = $cloudUrl . '/api/index/site_reg';
         $responseBody = curl_request($url, $params, 'POST');
         $response = json_decode($responseBody, true);
+
         if (json_last_error() !== JSON_ERROR_NONE || !is_array($response)) {
             throw new Exception('授权服务返回格式异常');
         }
 
-        if (($response['code'] ?? 0) != 1) {
+        if ((int) ($response['code'] ?? 0) !== 1) {
             throw new Exception('授权失败：' . ($response['msg'] ?? '未知错误'));
         }
 
         $data = $response['data'] ?? [];
+        if (empty($data['project_type'])) {
+            throw new Exception('授权服务未返回项目类型');
+        }
 
         if ($authCheck === 1) {
             if (empty($data['secret_key']) || empty($data['license']) || empty($data['pem'])) {
                 throw new Exception('授权服务返回数据不完整');
             }
-            // 启用授权验证时，写入授权文件
+
+            // 启用授权校验时，写入授权文件
             file_put_contents($lockFile, $data['secret_key']);
             file_put_contents($licenseFile, $data['license']);
             file_put_contents($pemFile, $data['pem']);
         } else {
-            // 关闭授权验证时，只写入注册标记，避免重复进入注册页
-            file_put_contents($lockFile, !empty($data['secret_key']) ? $data['secret_key'] : 'auth_check_disabled-' . uniqid('', true));
+            // 关闭授权校验时，仅写入注册标记，避免重复进入注册页
+            file_put_contents(
+                $lockFile,
+                !empty($data['secret_key']) ? $data['secret_key'] : 'auth_check_disabled-' . uniqid('', true)
+            );
             is_file($licenseFile) && @unlink($licenseFile);
             is_file($pemFile) && @unlink($pemFile);
         }
 
-        if (empty($data['project_type'])) {
-            throw new Exception('授权服务未返回项目类型');
-        }
-
         // 保存云端确认后的项目类型、运行环境和授权校验开关
-        $cloudConfig = include "../application/extra/cloud.php";
+        $cloudConfig = $config;
         $cloudConfig['type'] = $data['project_type'];
         $cloudConfig['env'] = $env;
         $cloudConfig['auth_check'] = $authCheck;
-        file_put_contents("../application/extra/cloud.php", '<?php' . "\n\nreturn " . var_export($cloudConfig, true) . ";\n");
+        save_cloud_config($cloudConfig);
 
-        //删除当前安装脚本
+        // 删除当前安装脚本
         @unlink(__FILE__);
+
+        json_response(1, '注册成功');
     } catch (\Throwable $e) {
-        exit(json_encode(['code' => 0, 'msg' => $e->getMessage()]));
+        json_response(0, $e->getMessage());
     }
-    exit(json_encode(['code' => 1, 'msg' => '注册成功']));
 }
 ?>
-
 <!doctype html>
-<html>
-
+<html lang="zh-CN">
 <head>
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <title>站点注册</title>
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1">
     <meta name="renderer" content="webkit">
-    <script src=".\assets\libs\jquery\dist\jquery.min.js"></script>
+    <script src="./assets/libs/jquery/dist/jquery.min.js"></script>
     <style>
-        :root {
-            --primary: #0891b2;
-            --primary-dark: #0e7490;
-            --success: #16a34a;
-            --danger: #dc2626;
-            --text: #164e63;
-            --muted: #64748b;
-            --border: #dbeafe;
-            --card: rgba(255, 255, 255, 0.92);
-            --shadow: 0 24px 70px rgba(8, 91, 126, 0.18);
-        }
+    :root {
+        --bg-top: #f3fbff;
+        --bg-bottom: #eef6ff;
+        --panel: rgba(255, 255, 255, 0.92);
+        --panel-strong: #ffffff;
+        --line: #d8e8f7;
+        --line-strong: #bfd9ef;
+        --text: #17324d;
+        --text-soft: #5f7892;
+        --title: #0f2740;
+        --primary: #1f8fcb;
+        --primary-dark: #146d9c;
+        --primary-soft: rgba(31, 143, 203, 0.12);
+        --secondary: #eaf6ff;
+        --success: #1f9d68;
+        --success-bg: #e8f8f0;
+        --success-line: #b8e7d0;
+        --danger: #c94d5d;
+        --danger-bg: #fff1f3;
+        --danger-line: #f5c7cf;
+        --shadow-lg: 0 28px 80px rgba(58, 105, 145, 0.16);
+        --shadow-md: 0 16px 42px rgba(68, 111, 150, 0.12);
+        --shadow-sm: 0 10px 24px rgba(94, 127, 159, 0.10);
+        --radius-xl: 28px;
+        --radius-lg: 20px;
+        --radius-md: 14px;
+        --radius-sm: 12px;
+    }
 
-        * {
-            box-sizing: border-box;
-        }
+    * {
+        box-sizing: border-box;
+    }
 
+    html {
+        min-height: 100%;
+    }
+
+    body {
+        min-height: 100vh;
+        margin: 0;
+        padding: 40px 16px;
+        color: var(--text);
+        line-height: 1.5;
+        background:
+            radial-gradient(circle at 0% 0%, rgba(143, 211, 255, 0.45), transparent 28%),
+            radial-gradient(circle at 100% 12%, rgba(196, 233, 255, 0.72), transparent 24%),
+            radial-gradient(circle at 20% 100%, rgba(217, 242, 255, 0.78), transparent 26%),
+            linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+
+    body,
+    input,
+    select,
+    button {
+        font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        font-size: 14px;
+    }
+
+    a {
+        color: var(--primary);
+        text-decoration: none;
+    }
+
+    a:hover {
+        text-decoration: none;
+    }
+
+    .container {
+        position: relative;
+        width: 100%;
+        max-width: 580px;
+        margin: 0 auto;
+        padding: 18px;
+        border-radius: 32px;
+        background: rgba(255, 255, 255, 0.38);
+        box-shadow: var(--shadow-lg);
+        backdrop-filter: blur(12px);
+    }
+
+    .container::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: 32px;
+        padding: 1px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(191, 217, 239, 0.55));
+        -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+        -webkit-mask-composite: xor;
+        mask-composite: exclude;
+        pointer-events: none;
+    }
+
+    .register-card {
+        position: relative;
+        overflow: hidden;
+        border-radius: var(--radius-xl);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(250, 253, 255, 0.98));
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.88);
+    }
+
+    .register-card::before {
+        content: "";
+        position: absolute;
+        top: -120px;
+        right: -90px;
+        width: 220px;
+        height: 220px;
+        border-radius: 999px;
+        background: radial-gradient(circle, rgba(139, 218, 255, 0.36), transparent 70%);
+        pointer-events: none;
+    }
+
+    .register-header {
+        position: relative;
+        padding: 34px 34px 20px;
+        text-align: center;
+    }
+
+    .register-badge {
+        width: 84px;
+        height: 84px;
+        margin: 0 auto 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 26px;
+        background: linear-gradient(180deg, #ffffff 0%, #edf9ff 100%);
+        border: 1px solid rgba(202, 230, 246, 0.92);
+        box-shadow: var(--shadow-md);
+    }
+
+    .register-badge svg {
+        width: 58px;
+        height: 58px;
+    }
+
+    .register-eyebrow {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 30px;
+        padding: 0 14px;
+        margin-bottom: 12px;
+        border: 1px solid #d7ebfa;
+        border-radius: 999px;
+        color: #4d86ab;
+        background: #f4fbff;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 1px;
+    }
+
+    .register-title {
+        margin: 0;
+        color: var(--title);
+        font-size: 31px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+    }
+
+    .page-desc {
+        max-width: 420px;
+        margin: 12px auto 0;
+        color: var(--text-soft);
+        font-size: 14px;
+        line-height: 1.75;
+    }
+
+    .register-body {
+        padding: 6px 34px 34px;
+    }
+
+    form {
+        margin: 0;
+        text-align: left;
+    }
+
+    .form-panel {
+        padding: 24px;
+        border: 1px solid #e4f0fa;
+        border-radius: 22px;
+        background: linear-gradient(180deg, rgba(247, 252, 255, 0.92), rgba(255, 255, 255, 0.98));
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84);
+    }
+
+    .form-group {
+        margin-bottom: 18px;
+    }
+
+    .form-group:last-of-type {
+        margin-bottom: 0;
+    }
+
+    .form-field {
+        position: relative;
+    }
+
+    .form-field label {
+        display: block;
+        margin-bottom: 9px;
+        color: #23415f;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.2px;
+    }
+
+    .form-field input,
+    .custom-select {
+        width: 100%;
+        height: 52px;
+        margin: 0;
+        padding: 0 16px;
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+        background: var(--panel-strong);
+        outline: none;
+        transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s, transform 0.2s;
+    }
+
+    .form-field input::placeholder {
+        color: #95aabd;
+    }
+
+    .form-field input:hover,
+    .custom-select:hover {
+        border-color: var(--line-strong);
+        background: #fcfeff;
+    }
+
+    .form-field input:focus,
+    .custom-select:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 4px var(--primary-soft);
+        background: #ffffff;
+    }
+
+    .custom-select {
+        padding-right: 46px;
+        cursor: pointer;
+        appearance: none;
+        -webkit-appearance: none;
+        -moz-appearance: none;
+        background-image: url("data:image/svg+xml,%3Csvg width='14' height='14' viewBox='0 0 14 14' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3.2 5.1L7 8.9l3.8-3.8' fill='none' stroke='%231f8fcb' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 16px center;
+        background-size: 14px;
+    }
+
+    .form-field span {
+        display: inline-block;
+        margin-top: 8px;
+        color: var(--text-soft);
+        font-size: 12px;
+        line-height: 1.6;
+    }
+
+    .date-row {
+        display: flex;
+        gap: 10px;
+    }
+
+    .date-row input {
+        flex: 1;
+    }
+
+    #error,
+    #success {
+        margin-bottom: 18px;
+        padding: 14px 16px;
+        border-radius: 14px;
+        line-height: 1.7;
+        font-size: 13px;
+    }
+
+    #error {
+        color: var(--danger);
+        border: 1px solid var(--danger-line);
+        background: var(--danger-bg);
+        box-shadow: 0 10px 20px rgba(201, 77, 93, 0.08);
+    }
+
+    #success {
+        color: var(--success);
+        border: 1px solid var(--success-line);
+        background: var(--success-bg);
+        box-shadow: 0 10px 20px rgba(31, 157, 104, 0.08);
+    }
+
+    .form-buttons {
+        margin-top: 24px;
+        min-height: 54px;
+        line-height: normal;
+    }
+
+    button,
+    .btn {
+        width: 100%;
+        min-height: 54px;
+        padding: 0 28px;
+        color: #ffffff;
+        border: 0;
+        border-radius: 14px;
+        cursor: pointer;
+        font-weight: 700;
+        letter-spacing: 0.8px;
+        background: linear-gradient(135deg, #2899d4 0%, #54b5e3 100%);
+        box-shadow: 0 18px 34px rgba(40, 153, 212, 0.24);
+        transition: transform 0.2s, box-shadow 0.2s, opacity 0.2s, filter 0.2s;
+        -webkit-appearance: none;
+    }
+
+    button:hover,
+    .btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 22px 38px rgba(40, 153, 212, 0.28);
+        filter: saturate(1.02);
+    }
+
+    button:focus-visible,
+    .btn:focus-visible {
+        outline: 3px solid rgba(31, 143, 203, 0.22);
+        outline-offset: 3px;
+    }
+
+    button[disabled] {
+        cursor: not-allowed;
+        opacity: 0.66;
+        transform: none;
+        box-shadow: none;
+        filter: none;
+    }
+
+    .permanent-btn {
+        width: 96px;
+        min-height: 52px;
+        padding: 0;
+        flex: 0 0 96px;
+        color: var(--primary-dark);
+        background: linear-gradient(180deg, #f6fbff 0%, #e8f4fc 100%);
+        border: 1px solid #d0e5f5;
+        box-shadow: none;
+    }
+
+    .permanent-btn:hover {
+        box-shadow: none;
+        background: linear-gradient(180deg, #fafdff 0%, #e1f0fb 100%);
+    }
+
+    #back-home {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        min-height: 54px;
+        margin-top: 6px;
+        color: #ffffff;
+        border-radius: 14px;
+        background: linear-gradient(135deg, #2899d4 0%, #54b5e3 100%) !important;
+        box-shadow: 0 18px 34px rgba(40, 153, 212, 0.24);
+    }
+
+    #back-home:hover {
+        color: #ffffff;
+    }
+
+    @media (max-width: 640px) {
         body {
-            min-height: 100vh;
-            margin: 0;
-            padding: 48px 18px;
-            line-height: 1.5;
-            color: var(--text);
-            background:
-                radial-gradient(circle at 12% 18%, rgba(34, 211, 238, 0.34), transparent 28%),
-                radial-gradient(circle at 86% 12%, rgba(8, 145, 178, 0.20), transparent 30%),
-                linear-gradient(135deg, #ecfeff 0%, #f8fafc 48%, #e0f2fe 100%);
-            -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
-        }
-
-        body,
-        input,
-        select,
-        button {
-            font-family: "Microsoft Yahei", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
-            font-size: 14px;
-        }
-
-        a {
-            color: var(--primary);
-            text-decoration: none;
-        }
-
-        a:hover {
-            text-decoration: underline;
+            padding: 20px 12px;
         }
 
         .container {
-            width: 100%;
-            max-width: 520px;
-            margin: 0 auto;
-            padding: 34px;
-            text-align: center;
-            background: var(--card);
-            border: 1px solid rgba(255, 255, 255, 0.72);
+            padding: 12px;
+            border-radius: 24px;
+        }
+
+        .register-header {
+            padding: 26px 22px 16px;
+        }
+
+        .register-body {
+            padding: 0 22px 24px;
+        }
+
+        .form-panel {
+            padding: 18px;
             border-radius: 18px;
-            box-shadow: var(--shadow);
-            backdrop-filter: blur(18px);
         }
 
-        h1 {
-            width: 78px;
-            height: 78px;
-            margin: 0 auto 16px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 22px;
-            background: linear-gradient(145deg, #ffffff, #cffafe);
-            box-shadow: 0 14px 36px rgba(8, 145, 178, 0.20);
-        }
-
-        h1 svg {
-            width: 56px;
-            height: 56px;
-        }
-
-        h2 {
-            margin: 0;
-            font-size: 30px;
-            font-weight: 700;
-            letter-spacing: 1px;
-            color: #0f3f56;
+        .register-title {
+            font-size: 26px;
         }
 
         .page-desc {
-            margin: 10px 0 0;
-            color: var(--muted);
-            font-size: 14px;
-        }
-
-        form {
-            margin-top: 30px;
-            text-align: left;
-        }
-
-        .form-group {
-            margin-bottom: 18px;
-        }
-
-        .form-field {
-            position: relative;
-        }
-
-        .form-field label {
-            display: block;
-            margin-bottom: 8px;
-            color: #22576b;
             font-size: 13px;
-            font-weight: 700;
-        }
-
-        .form-field input,
-        .custom-select {
-            width: 100%;
-            height: 50px;
-            margin: 0;
-            padding: 0 44px 0 15px;
-            color: #0f172a;
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            background-color: #fff;
-            outline: none;
-            transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-        }
-
-        .form-field input:hover,
-        .custom-select:hover {
-            border-color: #93c5fd;
-        }
-
-        .form-field input:focus,
-        .custom-select:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 4px rgba(8, 145, 178, 0.12);
-        }
-
-        .custom-select {
-            cursor: pointer;
-            appearance: none;
-            -webkit-appearance: none;
-            -moz-appearance: none;
-            background-image: url("data:image/svg+xml,%3Csvg width='14' height='14' viewBox='0 0 14 14' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3.2 5.1L7 8.9l3.8-3.8' fill='none' stroke='%230891B2' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-            background-repeat: no-repeat;
-            background-position: right 16px center;
-            background-size: 14px;
-        }
-
-        .form-field span {
-            display: inline-block;
-            margin-top: 8px;
-            color: var(--muted);
-            font-size: 12px;
-        }
-
-        button,
-        .btn {
-            width: 100%;
-            min-height: 50px;
-            padding: 0 28px;
-            color: #fff;
-            border: 0;
-            border-radius: 10px;
-            cursor: pointer;
-            font-weight: 700;
-            letter-spacing: 1px;
-            background: linear-gradient(135deg, var(--primary), var(--success));
-            box-shadow: 0 14px 30px rgba(8, 145, 178, 0.24);
-            transition: transform 0.2s, box-shadow 0.2s, opacity 0.2s;
-            -webkit-appearance: none;
-        }
-
-        button:hover,
-        .btn:hover {
-            text-decoration: none;
-            transform: translateY(-1px);
-            box-shadow: 0 18px 36px rgba(8, 145, 178, 0.30);
-        }
-
-        button:focus-visible,
-        .btn:focus-visible {
-            outline: 3px solid rgba(8, 145, 178, 0.24);
-            outline-offset: 3px;
-        }
-
-        button[disabled] {
-            cursor: not-allowed;
-            opacity: 0.62;
-            transform: none;
-            box-shadow: none;
-        }
-
-        .form-buttons {
-            margin-top: 24px;
-            min-height: 50px;
-            line-height: normal;
-        }
-
-        #error,
-        .error,
-        #success,
-        .success,
-        #warmtips,
-        .warmtips {
-            margin-bottom: 18px;
-            padding: 13px 15px;
-            border-radius: 10px;
-            line-height: 1.6;
-        }
-
-        #error,
-        .error {
-            color: #991b1b;
-            background: #fee2e2;
-            border: 1px solid #fecaca;
-        }
-
-        #success,
-        .success {
-            color: #166534;
-            background: #dcfce7;
-            border: 1px solid #bbf7d0;
-        }
-
-        #warmtips,
-        .warmtips {
-            color: #b45309;
-            background: #fffbeb;
-            border: 1px solid #fde68a;
-        }
-
-        #error a,
-        .error a {
-            color: #991b1b;
-            text-decoration: underline;
-        }
-
-        @media (max-width: 520px) {
-            body {
-                padding: 24px 12px;
-            }
-
-            .container {
-                padding: 26px 18px;
-                border-radius: 14px;
-            }
-
-            h2 {
-                font-size: 26px;
-            }
-        }
-
-        @media (prefers-reduced-motion: reduce) {
-
-            *,
-            *::before,
-            *::after {
-                transition: none !important;
-            }
         }
 
         .date-row {
-            display: flex;
-            gap: 10px;
-        }
-
-        .date-row input {
-            flex: 1;
+            flex-direction: column;
         }
 
         .permanent-btn {
-            width: 82px;
-            min-height: 50px;
-            padding: 0;
-            flex: 0 0 82px;
-            background: #0f766e;
-            box-shadow: none;
-        }
-
-        #hehe {
-            display: flex;
-            align-items: center;
-            justify-content: center;
             width: 100%;
-            min-height: 50px;
-            margin-top: 4px;
-            color: #fff;
-            border-radius: 10px;
-            background: linear-gradient(135deg, #0891b2, #16a34a) !important;
-            box-shadow: 0 14px 30px rgba(8, 145, 178, 0.24);
+            flex-basis: auto;
         }
+    }
 
-        #hehe:hover {
-            color: #fff;
-            text-decoration: none;
-            transform: translateY(-1px);
-            box-shadow: 0 18px 36px rgba(8, 145, 178, 0.30);
+    @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+            transition: none !important;
+            animation: none !important;
+            scroll-behavior: auto !important;
         }
-    </style>
+    }
+</style>
 </head>
 
 <body>
     <div class="container">
-        <h1>
-            <svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" width="80px" height="96px" viewBox="0 0 64 64" enable-background="new 0 0 64 64" xml:space="preserve">
-                <image id="image0" width="64" height="64" x="0" y="0"
-                    xlink:href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABABAMAAABYR2ztAAAAIGNIUk0AAHomAACAhAAA+gAAAIDo
-AAB1MAAA6mAAADqYAAAXcJy6UTwAAAAeUExURQAAANcgCNcdBdgdBdcgCNkeBtgeBtceBtgeBv//
-/3haf5gAAAAIdFJOUwAgYL9An9+AZHoGogAAAAFiS0dECfHZpewAAAAHdElNRQfpBAgFJxAMEg4v
-AAABg0lEQVRIx9WVPW/CMBCGndSUjhk7hlRCnRGqGEFVKCNUhGYtSzOWBXVOGsjPrmXfJf7IuVKV
-pe+Uyz0++474hbGhFfnT4aJa+fJpI7Sj8w+N1IzYJswbULXszRdNq2pClkfN7W0OmME6HwYRLrB2
-3O6k95vi8los422xnbP9q4qfMYZ+N86KF9ymlOEjlNea508ucDROHZxtYO/8LIUOVLE7OZ4kyQSB
-0vsNDAWkWaYfNMxAMQJWnRFOb/ufAX0+FpC8rbzAWpQ9eYAb+b1GNPAlT/ZOAoE6+pUEsLuIAu4A
-iCngHoBPCth08/tjhVsAlhQwVvkLPSh1K79/m+S2B1irkBc4SBsQriDDUYH3XAfkkvQowwCtJ9dv
-t/SSwPigpub1v0bWfcttAzHdleeuBenuiraoAHTGywnzY3iDvsKBb+YqRtvsbK31TunQaJu1fu4p
-vBRed8ZHsyt01zqHh37b69TzvzTWiZj1qG3GcGWDOPjzQrKDMmK0RDMz5lW6Z4PrB+cAkBWPxSLd
-AAAAJXRFWHRkYXRlOmNyZWF0ZQAyMDI1LTA0LTA4VDA1OjM5OjE2KzAwOjAwCszI4wAAACV0RVh0
-ZGF0ZTptb2RpZnkAMjAyNS0wNC0wOFQwNTozOToxNiswMDowMHuRcF8AAAAodEVYdGRhdGU6dGlt
-ZXN0YW1wADIwMjUtMDQtMDhUMDU6Mzk6MTYrMDA6MDAshFGAAAAAAElFTkSuQmCC" />
-            </svg>
-        </h1>
-        <h2>站点注册</h2>
-        <div>
+    <div class="register-card">
+        <div class="register-header">
+            <!-- <div class="register-eyebrow">LICENSE CENTER</div> -->
+            <h2 class="register-title">站点注册</h2>
+            <p class="page-desc">填写基础信息后完成当前站点授权注册</p>
+        </div>
 
-            <form method="post">
+        <div class="register-body">
+            <form method="post" id="register-form">
                 <div id="error" style="display:none"></div>
                 <div id="success" style="display:none"></div>
 
-                <div class="form-group">
-                    <div class="form-field">
-                        <label>项目类型</label>
-                        <select name="project_id" class="custom-select" required id="make">
-                            <option value="">----- 请选择项目类型 -----</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <div class="form-field">
-                        <label>运行环境</label>
-                        <select name="env" class="custom-select" required>
-                            <option value="local">本地</option>
-                            <option value="online">线上</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <div class="form-field">
-                        <label>站点名称</label>
-                        <input type="text" name="name" value="" required="">
-                    </div>
-                </div>
-                <div class="form-group">
-                    <div class="form-field">
-                        <label>授权验证</label>
-                        <select name="auth_check" class="custom-select" required id="auth-check">
-                            <option value="1">启用授权验证</option>
-                            <option value="0" selected>关闭授权验证</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="form-group" id="period-group" style="display:none">
-                    <div class="form-field">
-                        <label>授权有效期</label>
-                        <div class="date-row">
-                            <input type="date" name="period" value="" required id="ID-laydate-demo" max="2999-12-31">
-                            <button type="button" class="permanent-btn" id="set-permanent">永久</button>
+                <div class="form-panel">
+                    <div class="form-group">
+                        <div class="form-field">
+                            <label for="make">项目类型</label>
+                            <select name="project_id" class="custom-select" required id="make">
+                                <option value="">----- 请选择项目类型 -----</option>
+                            </select>
                         </div>
                     </div>
-                </div>
-                <div class="form-group" id="devnum-group" style="display:none">
-                    <div class="form-field">
-                        <label>授权设备数</label>
-                        <input type="text" name="devnum" value="-1">
-                        <span>tips:-1表示不限制</span>
+
+                    <div class="form-group">
+                        <div class="form-field">
+                            <label for="env">运行环境</label>
+                            <select name="env" class="custom-select" required id="env">
+                                <option value="local">本地</option>
+                                <option value="online">线上</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <div class="form-field">
+                            <label for="name">站点名称</label>
+                            <input type="text" name="name" value="" required id="name">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <div class="form-field">
+                            <label for="auth-check">授权校验</label>
+                            <select name="auth_check" class="custom-select" required id="auth-check">
+                                <option value="1">启用授权校验</option>
+                                <option value="0" selected>关闭授权校验</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-group" id="period-group" style="display:none">
+                        <div class="form-field">
+                            <label for="period">授权有效期</label>
+                            <div class="date-row">
+                                <input type="date" name="period" value="" required id="period" max="2999-12-31">
+                                <button type="button" class="permanent-btn" id="set-permanent">永久</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group" id="devnum-group" style="display:none">
+                        <div class="form-field">
+                            <label for="devnum">授权设备数</label>
+                            <input type="text" name="devnum" value="-1" id="devnum">
+                            <span>tips：`-1` 表示不限制</span>
+                        </div>
                     </div>
                 </div>
 
                 <div class="form-buttons">
-                    <button type="submit">提 交</button>
+                    <button type="submit" id="submit-btn">提交</button>
                 </div>
             </form>
-
-            <script>
-                let baseurl = "<?php echo $cloudUrl ?>";
-
-                // 获取项目数据
-                function callback(data) {
-                    if (!$.isArray(data) || data.length === 0) {
-                        $('#error').show().text('获取项目类型失败，请检查云端地址配置');
-                        return;
-                    }
-
-                    data.forEach(function(item) {
-                        $('#make').append(
-                            '<option value="' + item.type + '" data-type="' + item.type + '">' + item.name + '</option>'
-                        );
-                    });
-
-                    $('#error').hide();
-                    $('#make').trigger('change');
-                }
-
-                $.ajax({
-                    url: baseurl + '/api/index/getproject',
-                    type: "GET",
-                    dataType: "jsonp",
-                    jsonpCallback: "callback",
-                    timeout: 5000,
-                    error: function() {
-                        $('#error').show().text('获取项目类型失败，请检查云端地址或网络连接');
-                    }
-                });
-
-                $(function() {
-                    $('form :input:first').select();
-
-                    function togglePeriod() {
-                        var isAuthCheck = $('#auth-check').val() === '1';
-                        var $period = $('#ID-laydate-demo');
-
-                        if (isAuthCheck) {
-                            $('#period-group').show();
-                            $period.prop('required', true);
-
-                            // 重新启用授权校验时，清空隐藏状态下的默认值，避免用户误提交
-                            if ($period.val() === '2999-12-31') {
-                                $period.val('');
-                            }
-                        } else {
-                            $('#period-group').hide();
-                            $period.prop('required', false).val('');
-                        }
-                    }
-
-                    $('#auth-check').on('change', togglePeriod);
-                    togglePeriod();
-
-                    $('#set-permanent').on('click', function() {
-                        // 原生 date 只能保存日期，后端会统一补齐为 2999-12-31 23:59:59
-                        $('#ID-laydate-demo').val('2999-12-31');
-                    });
-
-                    function toggleDevnum() {
-                        var projectType = $('#make option:selected').data('type');
-                        var isIotadmin = projectType === 'iotadmin';
-
-                        $('#devnum-group').toggle(isIotadmin);
-                        $('#devnum-group input[name="devnum"]').prop('required', isIotadmin);
-                    }
-
-                    $('#make').on('change', toggleDevnum);
-                    toggleDevnum();
-
-                    $('form').on('submit', function(e) {
-                        e.preventDefault();
-                        var form = this;
-                        var $error = $("#error");
-                        var $success = $("#success");
-                        var $button = $(this).find('button[type="submit"]')
-                            .text("提交中...")
-                            .prop('disabled', true);
-
-                        var $sub_buttons = $(".form-buttons", form);
-
-                        $.ajax({
-                            url: "",
-                            type: "POST",
-                            dataType: "json",
-                            data: $(this).serialize(),
-                            success: function(ret) {
-                                if (ret.code == 1) {
-                                    var data = ret.data;
-                                    $error.hide();
-                                    $(".form-group", form).remove();
-                                    $button.remove();
-                                    $("#success").text(ret.msg).show();
-                                    $("<a class='btn' id='hehe' href='/'>返回主页</a>").appendTo($sub_buttons);
-                                } else {
-                                    $error.show().text(ret.msg);
-                                    $button.prop('disabled', false).text("重新提交");
-                                    $("html,body").animate({
-                                        scrollTop: 0
-                                    }, 500);
-                                }
-                            },
-                            error: function(xhr) {
-                                $error.show().text(xhr.responseText);
-                                $button.prop('disabled', false).text("重新提交");
-                                $("html,body").animate({
-                                    scrollTop: 0
-                                }, 500);
-                            }
-                        });
-                        return false;
-                    });
-                });
-            </script>
         </div>
     </div>
-</body>
+</div>
 
+    <script>
+        var baseurl = "<?php echo htmlspecialchars($cloudUrl, ENT_QUOTES, 'UTF-8'); ?>";
+
+        // 获取项目类型数据
+        function callback(data) {
+            if (!$.isArray(data) || data.length === 0) {
+                $('#error').show().text('获取项目类型失败，请检查云端地址配置');
+                return;
+            }
+
+            data.forEach(function(item) {
+                $('#make').append(
+                    '<option value="' + item.type + '" data-type="' + item.type + '">' + item.name + '</option>'
+                );
+            });
+
+            $('#error').hide();
+            $('#make').trigger('change');
+        }
+
+        // 拉取项目类型列表
+        $.ajax({
+            url: baseurl + '/api/index/getproject',
+            type: 'GET',
+            dataType: 'jsonp',
+            jsonpCallback: 'callback',
+            timeout: 5000,
+            error: function() {
+                $('#error').show().text('获取项目类型失败，请检查云端地址或网络连接');
+            }
+        });
+
+        $(function() {
+            $('#name').trigger('focus');
+
+            // 切换授权有效期输入框
+            function togglePeriod() {
+                var isAuthCheck = $('#auth-check').val() === '1';
+                var $period = $('#period');
+
+                if (isAuthCheck) {
+                    $('#period-group').show();
+                    $period.prop('required', true);
+
+                    // 重新启用授权校验时，清理永久日期占位值
+                    if ($period.val() === '2999-12-31') {
+                        $period.val('');
+                    }
+                } else {
+                    $('#period-group').hide();
+                    $period.prop('required', false).val('');
+                }
+            }
+
+            // 按项目类型切换设备数输入框
+            function toggleDevnum() {
+                var projectType = $('#make option:selected').data('type');
+                var isIotadmin = projectType === 'iotadmin';
+
+                $('#devnum-group').toggle(isIotadmin);
+                $('#devnum').prop('required', isIotadmin);
+            }
+
+            $('#auth-check').on('change', togglePeriod);
+            $('#make').on('change', toggleDevnum);
+
+            $('#set-permanent').on('click', function() {
+                // 原生 date 只保存日期，后端会补齐为 2999-12-31 23:59:59
+                $('#period').val('2999-12-31');
+            });
+
+            togglePeriod();
+            toggleDevnum();
+
+            $('#register-form').on('submit', function(e) {
+                e.preventDefault();
+
+                var form = this;
+                var $error = $('#error');
+                var $success = $('#success');
+                var $button = $('#submit-btn');
+                var $subButtons = $('.form-buttons', form);
+
+                $error.hide().text('');
+                $success.hide().text('');
+                $button.text('提交中...').prop('disabled', true);
+
+                $.ajax({
+                    url: '',
+                    type: 'POST',
+                    dataType: 'json',
+                    data: $(form).serialize(),
+                    success: function(ret) {
+                        if (ret.code === 1) {
+                            $error.hide();
+                            $('.form-group', form).remove();
+                            $button.remove();
+                            $success.text(ret.msg).show();
+                            $("<a class='btn' id='back-home' href='/'>返回首页</a>").appendTo($subButtons);
+                            return;
+                        }
+
+                        $error.show().text(ret.msg || '提交失败');
+                        $button.prop('disabled', false).text('重新提交');
+                        $('html,body').animate({ scrollTop: 0 }, 300);
+                    },
+                    error: function(xhr) {
+                        var message = '提交失败，请稍后重试';
+                        if (xhr.responseJSON && xhr.responseJSON.msg) {
+                            message = xhr.responseJSON.msg;
+                        } else if (xhr.responseText) {
+                            message = xhr.responseText;
+                        }
+
+                        $error.show().text(message);
+                        $button.prop('disabled', false).text('重新提交');
+                        $('html,body').animate({ scrollTop: 0 }, 300);
+                    }
+                });
+
+                return false;
+            });
+        });
+    </script>
+</body>
 </html>

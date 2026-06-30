@@ -16,7 +16,7 @@ class LiccoreReset extends Command
 
     protected function execute(Input $input, Output $output)
     {
-        $licenseDir = ROOT_PATH . 'application/common/license/';
+        $licenseDir = APP_PATH . 'common' . DS . 'license' . DS;
         $files = [
             $licenseDir . 'register.lock',
             $licenseDir . 'license.lic',

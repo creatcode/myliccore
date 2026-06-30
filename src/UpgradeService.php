@@ -249,6 +249,7 @@ class UpgradeService
     {
         $cloudFile = APP_PATH . 'extra/cloud.php';
         $cloudConfig = is_file($cloudFile) ? include $cloudFile : [];
+        $cloudConfig = is_array($cloudConfig) ? $cloudConfig : [];
         $cloudConfig = array_merge($cloudConfig, ['version' => $version]);
 
         if (file_put_contents($cloudFile, '<?php' . "\n\nreturn " . var_export($cloudConfig, true) . ";\n") === false) {

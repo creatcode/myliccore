@@ -14,7 +14,7 @@
 
     $cloudConfig = \think\Config::get('cloud');
 
-    if (isset($cloudConfig['auth_check']) && (int) $cloudConfig['auth_check'] === 0) {
+    if (!is_array($cloudConfig) || !isset($cloudConfig['auth_check']) || $cloudConfig['auth_check'] == 0) {
         return;
     }
 
